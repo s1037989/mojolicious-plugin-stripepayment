@@ -119,9 +119,34 @@ our $VERSION = '0.03';
 my @CAPTURE_KEYS = qw( amount application_fee receipt_email statement_descriptor );
 my @CHARGE_KEYS
   = qw( amount application_fee receipt_email statement_descriptor currency customer source description capture );
+my @REFUND_KEYS = qw( amount refund_application_fee reason );
 
 # Subject for change
 our $MOCKED_RESPONSE = {
+  status => 200,
+  json   => {
+    id                   => 'ch_15ceESLV2Qt9u2twk0Arv0Z8',
+    object               => 'charge',
+    created              => time,
+    paid                 => \1,
+    status               => 'succeeded',
+    refunded             => \0,
+    source               => {},
+    balance_transaction  => 'txn_14sJxWLV2Qt9u2tw35SuFG9X',
+    failure_message      => undef,
+    failure_code         => undef,
+    amount_refunded      => 0,
+    customer             => undef,
+    invoice              => undef,
+    dispute              => 0,
+    statement_descriptor => undef,
+    fraud_details        => {},
+    receipt_number       => undef,
+    shipping             => undef,
+    refunds              => {},
+  }
+};
+our $MOCKED_REFUND_RESPONSE = {
   status => 200,
   json   => {
     id                   => 'ch_15ceESLV2Qt9u2twk0Arv0Z8',
@@ -303,6 +328,7 @@ sub register {
   $app->helper('stripe.create_charge'   => sub { $self->_create_charge(@_); });
   $app->helper('stripe.pub_key'         => sub { $self->pub_key; });
   $app->helper('stripe.retrieve_charge' => sub { $self->_retrieve_charge(@_); });
+  $app->helper('stripe.create_refund' => sub { $self->_create_refund(@_); });
 }
 
 sub _capture_charge {
@@ -444,6 +470,21 @@ sub _mock_interface {
       }
     }
   );
+  $app->routes->post(
+    '/mocked/stripe-payment/charges/:id/refunds' => sub {
+      my $c = shift;
+      if ($c->req->url->to_abs->userinfo eq "$secret:") {
+        local $MOCKED_REFUND_RESPONSE->{json}{amount} //= $c->param('amount');
+        local $MOCKED_REFUND_RESPONSE->{json}{captured} = \1;
+        local $MOCKED_REFUND_RESPONSE->{json}{livemode} //= $secret =~ /test/ ? \0 : \1;
+        local $MOCKED_REFUND_RESPONSE->{json}{receipt_email} //= $c->param('receipt_email');
+        $c->render(%$MOCKED_REFUND_RESPONSE);
+      }
+      else {
+        $c->render(json => {error => {message => 'Bad secret!', type => 'invalid_request_error'}}, status => 400);
+      }
+    }
+  );
 }
 
 sub _retrieve_charge {
@@ -454,6 +495,32 @@ sub _retrieve_charge {
   warn "[StripePayment] Retrieve charge $url\n" if DEBUG;
 
   Mojo::IOLoop->delay(sub { $self->_ua->get($url, shift->begin); }, sub { $c->$cb($self->_tx_to_res($_[1])); });
+
+  return $c;
+}
+
+sub _create_refund {
+  my ($self, $c, $args, $cb) = @_;
+  my $url = Mojo::URL->new($self->base_url)->userinfo($self->secret . ':');
+  my %form;
+
+  $args->{id} or return $c->$cb('id is required', {});
+
+  for my $k (@REFUND_KEYS) {
+    $form{$k} = $args->{$k} if defined $args->{$k};
+  }
+
+  if (defined $form{statement_descriptor} and 22 < length $form{statement_descriptor}) {
+    return $c->$cb('statement_descriptor is too long', {});
+  }
+
+  push @{$url->path->parts}, 'charges', $args->{id}, 'refunds';
+  warn "[StripePayment] Refund $url\n" if DEBUG;
+
+  Mojo::IOLoop->delay(
+    sub { $self->_ua->post($url, form => \%form, shift->begin); },
+    sub { $c->$cb($self->_tx_to_res($_[1])); },
+  );
 
   return $c;
 }
